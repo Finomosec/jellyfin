@@ -42,6 +42,7 @@ public sealed class ImageProcessor : IImageProcessor, IDisposable
     private readonly IImageEncoder _imageEncoder;
 
     private readonly AsyncNonKeyedLocker _parallelEncodingLimit;
+    private readonly AsyncKeyedLocker<string> _perSourceEncodingLock;
 
     private bool _disposed;
 
@@ -72,6 +73,11 @@ public sealed class ImageProcessor : IImageProcessor, IDisposable
         }
 
         _parallelEncodingLimit = new(semaphoreCount);
+        _perSourceEncodingLock = new(o =>
+        {
+            o.PoolSize = 20;
+            o.PoolInitialFill = 1;
+        });
     }
 
     private string ResizedImageCachePath => Path.Combine(_appPaths.ImageCachePath, "resized-images");
@@ -197,17 +203,27 @@ public sealed class ImageProcessor : IImageProcessor, IDisposable
         {
             if (!File.Exists(cacheFilePath))
             {
-                string resultPath;
-
-                // Limit number of parallel (more precisely: concurrent) image encodings to prevent a high memory usage
-                using (await _parallelEncodingLimit.LockAsync().ConfigureAwait(false))
+                // Per-source lock: lets resize ops on different source images
+                // run concurrently while serializing identical-source work.
+                // The outer global limit still caps total parallelism to bound memory.
+                using (await _perSourceEncodingLock.LockAsync(originalImagePath).ConfigureAwait(false))
                 {
-                    resultPath = _imageEncoder.EncodeImage(originalImagePath, dateModified, cacheFilePath, autoOrient, orientation, quality, options, outputFormat);
-                }
+                    // Recheck: another waiter on the same source may have produced the same cache file
+                    if (File.Exists(cacheFilePath))
+                    {
+                        return (cacheFilePath, outputFormat.GetMimeType(), _fileSystem.GetLastWriteTimeUtc(cacheFilePath));
+                    }
 
-                if (string.Equals(resultPath, originalImagePath, StringComparison.OrdinalIgnoreCase))
-                {
-                    return (originalImagePath, MimeTypes.GetMimeType(originalImagePath), dateModified);
+                    string resultPath;
+                    using (await _parallelEncodingLimit.LockAsync().ConfigureAwait(false))
+                    {
+                        resultPath = _imageEncoder.EncodeImage(originalImagePath, dateModified, cacheFilePath, autoOrient, orientation, quality, options, outputFormat);
+                    }
+
+                    if (string.Equals(resultPath, originalImagePath, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return (originalImagePath, MimeTypes.GetMimeType(originalImagePath), dateModified);
+                    }
                 }
             }
 
@@ -545,6 +561,7 @@ public sealed class ImageProcessor : IImageProcessor, IDisposable
         }
 
         _parallelEncodingLimit?.Dispose();
+        _perSourceEncodingLock?.Dispose();
 
         _disposed = true;
     }
