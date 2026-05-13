@@ -2012,9 +2012,10 @@ public class ImageController : BaseJellyfinApiController
 
         Response.ContentType = imageContentType ?? MediaTypeNames.Text.Plain;
         Response.Headers.Append(HeaderNames.Age, Convert.ToInt64((DateTime.UtcNow - dateImageModified).TotalSeconds).ToString(CultureInfo.InvariantCulture));
-        Response.Headers.Append(HeaderNames.Vary, HeaderNames.Accept);
-
-        Response.Headers.ContentDisposition = "attachment";
+        // Vary: Accept removed — splits browser cache per Accept-header (fetch vs <img>);
+        // URL already encodes tag+size, so cross-Accept sharing is safe for our case.
+        // Content-Disposition: attachment removed — semantically wrong for <img>, can
+        // interfere with browser caching of image responses; inline (default) is correct.
 
         if (disableCaching)
         {
